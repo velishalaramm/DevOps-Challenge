@@ -1,0 +1,82 @@
+name: eoir-stack
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - sensor_backplane
+    restart: unless-stopped
+
+  inference_worker:
+    image: eoir-stack:1.4.2
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "inference_worker/worker.py"]
+    environment:
+      ENGINE_PATH: /app/models/eo_detector_fp16.engine
+      MANIFEST_PATH: /app/models/manifest.json
+      TRT_CACHE_DIR: /app/models/.trt_cache
+      WORKER_PORT: "9000"
+      ENGINE_WARMUP_SEC: "2"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:9000/status', timeout=2); raise SystemExit(0 if r.status == 200 else 1)"
+      interval: 5s
+      timeout: 2s
+      retries: 2
+      start_period: 2s
+    networks:
+      - sensor_backplane
+    restart: unless-stopped
+
+  vision_api:
+    image: eoir-stack:1.4.2
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "vision_api/app.py"]
+    environment:
+      APP_PORT: "8000"
+      WORKER_URL: "http://inference_worker:9000"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      DB_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "8000:8000"
+    depends_on:
+      inference_worker:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - edge_dmz
+      - sensor_backplane
+    restart: unless-stopped
+
+networks:
+  edge_dmz:
+    driver: bridge
+  sensor_backplane:
+    driver: bridge
+    internal: true
+
+volumes:
+  postgres_data:
